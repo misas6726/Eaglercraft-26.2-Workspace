@@ -71,6 +71,19 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 	private WebGL2VertexArray.Entry lastVertexArray;
 	private int lastDrawBufferCount = -1;
 
+	// Scissor state last written by trySetup(): -1 unknown, 0 disabled, 1 enabled with the rect below.
+	// Reset whenever a render pass begins or ends, because clears/blits/present change scissor
+	// state outside of draw calls.
+	private int drawScissorMode = -1;
+	private int drawScissorX, drawScissorY, drawScissorW, drawScissorH;
+
+	// Last range bound to each indexed UNIFORM_BUFFER binding point. Only bindUbo() writes indexed
+	// bindings (buffer uploads touch just the generic target), so identical re-binds can be skipped.
+	private static final int UBO_CACHE_SIZE = 64;
+	private final Object[] uboBoundHandle = new Object[UBO_CACHE_SIZE];
+	private final int[] uboBoundOffset = new int[UBO_CACHE_SIZE];
+	private final int[] uboBoundSize = new int[UBO_CACHE_SIZE];
+
 	protected WebGL2CommandEncoder(final WebGL2Device device) {
 		this.device = device;
 		this.gl = device.gl();
@@ -201,6 +214,7 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 		}
 		this.gl.viewport(0, 0, width, height);
 		this.lastPipeline = null;
+		this.drawScissorMode = -1;
 
 		ScissorState scissorState = new ScissorState();
 		scissorState.enable(descriptor.renderArea.x(), descriptor.renderArea.y(), descriptor.renderArea.width(), descriptor.renderArea.height());
@@ -210,6 +224,7 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 	@Override
 	public void submitRenderPass() {
 		this.lastDrawBufferCount = -1;
+		this.drawScissorMode = -1;
 		this.gl.bindFramebuffer(WebGL2Const.GL_FRAMEBUFFER, null);
 	}
 
@@ -630,7 +645,17 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 						+ " required=" + need + " available=" + room);
 			}
 		}
-		this.gl.bindBufferRange(WebGL2Const.GL_UNIFORM_BUFFER, ubo.blockBinding(), buf.handle(), offset, bindSize);
+		final int binding = ubo.blockBinding();
+		if (binding >= 0 && binding < UBO_CACHE_SIZE) {
+			final Object handle = buf.handle();
+			if (this.uboBoundHandle[binding] == handle && this.uboBoundOffset[binding] == offset && this.uboBoundSize[binding] == bindSize) {
+				return;
+			}
+			this.uboBoundHandle[binding] = handle;
+			this.uboBoundOffset[binding] = offset;
+			this.uboBoundSize[binding] = bindSize;
+		}
+		this.gl.bindBufferRange(WebGL2Const.GL_UNIFORM_BUFFER, binding, buf.handle(), offset, bindSize);
 	}
 
 	private boolean trySetup(final WebGL2RenderPass renderPass) {
@@ -693,10 +718,26 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 		renderPass.dirtyUniforms.clear();
 		this.setupDrawBuffers(renderPass.colorAttachmentCount);
 		if (renderPass.isScissorEnabled()) {
-			this.gl.enable(WebGL2Const.GL_SCISSOR_TEST);
-			this.gl.scissor(renderPass.getScissorX(), renderPass.getScissorY(), renderPass.getScissorWidth(), renderPass.getScissorHeight());
-		} else {
+			final int sx = renderPass.getScissorX();
+			final int sy = renderPass.getScissorY();
+			final int sw = renderPass.getScissorWidth();
+			final int sh = renderPass.getScissorHeight();
+			if (this.drawScissorMode != 1) {
+				this.gl.enable(WebGL2Const.GL_SCISSOR_TEST);
+				this.drawScissorMode = 1;
+				this.gl.scissor(sx, sy, sw, sh);
+			} else if (sx != this.drawScissorX || sy != this.drawScissorY || sw != this.drawScissorW || sh != this.drawScissorH) {
+				this.gl.scissor(sx, sy, sw, sh);
+			} else {
+				return true;
+			}
+			this.drawScissorX = sx;
+			this.drawScissorY = sy;
+			this.drawScissorW = sw;
+			this.drawScissorH = sh;
+		} else if (this.drawScissorMode != 0) {
 			this.gl.disable(WebGL2Const.GL_SCISSOR_TEST);
+			this.drawScissorMode = 0;
 		}
 		return true;
 	}
