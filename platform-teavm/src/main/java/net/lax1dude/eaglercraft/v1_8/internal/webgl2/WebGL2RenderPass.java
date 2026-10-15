@@ -98,7 +98,12 @@ public class WebGL2RenderPass implements RenderPassBackend {
 		if (sampler == null) {
 			this.samplers.remove(name);
 		} else {
-			this.samplers.put(name, new TextureViewAndSampler((WebGL2TextureView) textureView, (WebGL2Sampler) sampler));
+			// Re-binding the same view/sampler pair (common for atlas textures) reuses the
+			// existing record instead of allocating a new one per call.
+			TextureViewAndSampler existing = this.samplers.get(name);
+			if (existing == null || existing.view() != textureView || existing.sampler() != sampler) {
+				this.samplers.put(name, new TextureViewAndSampler((WebGL2TextureView) textureView, (WebGL2Sampler) sampler));
+			}
 		}
 		this.dirtyUniforms.add(name);
 	}

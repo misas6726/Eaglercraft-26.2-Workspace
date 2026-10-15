@@ -567,18 +567,20 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 		if (defaultIndexType == null) {
 			defaultIndexType = IndexType.SHORT;
 		}
+		// Loop-invariant: built once instead of allocating a capturing lambda per draw.
+		final com.mojang.blaze3d.systems.RenderPass.UniformUploader uniformUploader = (name, buffer) -> {
+			WebGL2Uniform u = renderPass.pipeline.program().getUniform(name);
+			if (u instanceof WebGL2Uniform.Ubo ubo) {
+				bindUbo(ubo, buffer);
+			}
+		};
 		for (com.mojang.blaze3d.systems.RenderPass.Draw<T> draw : draws) {
 			IndexType indexType = draw.indexType() == null ? defaultIndexType : draw.indexType();
 			renderPass.setIndexBuffer(draw.indexBuffer() == null ? defaultIndexBuffer : draw.indexBuffer(), indexType);
 			renderPass.setVertexBuffer(draw.slot(), draw.vertexBuffer().slice());
 			java.util.function.BiConsumer<T, com.mojang.blaze3d.systems.RenderPass.UniformUploader> uploader = draw.uniformUploaderConsumer();
 			if (uploader != null) {
-				uploader.accept(uniformArgument, (name, buffer) -> {
-					WebGL2Uniform u = renderPass.pipeline.program().getUniform(name);
-					if (u instanceof WebGL2Uniform.Ubo ubo) {
-						bindUbo(ubo, buffer);
-					}
-				});
+				uploader.accept(uniformArgument, uniformUploader);
 			}
 			if (renderPass.vertexBufferDirty) {
 				this.lastVertexArray = this.device.vertexArrayCache().bindVertexArray(renderPass.pipeline.info().getVertexFormatBindings(),
@@ -644,9 +646,10 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 			this.lastProgram = glProgram;
 		}
 
+		final boolean anyDirty = !renderPass.dirtyUniforms.isEmpty();
 		for (Map.Entry<String, WebGL2Uniform> entry : glProgram.getUniforms().entrySet()) {
 			String name = entry.getKey();
-			boolean isDirty = renderPass.dirtyUniforms.contains(name);
+			boolean isDirty = anyDirty && renderPass.dirtyUniforms.contains(name);
 			switch (entry.getValue()) {
 				case WebGL2Uniform.Ubo ubo -> {
 					// Rebind on program switch too (not just when dirty): UBO binding
@@ -670,8 +673,18 @@ public class WebGL2CommandEncoder implements CommandEncoderBackend, AutoCloseabl
 						int target = texture.cubemap ? WebGL2Const.GL_TEXTURE_CUBE_MAP : WebGL2Const.GL_TEXTURE_2D;
 						this.gl.bindTexture(target, texture.id);
 						this.gl.bindSampler(sampler.samplerIndex(), vs.sampler().getId());
-						this.gl.texParameteri(target, WebGL2Const.GL_TEXTURE_BASE_LEVEL, vs.view().baseMipLevel());
-						this.gl.texParameteri(target, WebGL2Const.GL_TEXTURE_MAX_LEVEL, vs.view().baseMipLevel() + vs.view().mipLevels() - 1);
+						// The mip window is per-texture GL state; only touch it when this view
+						// asks for a different window than the one last written.
+						int baseLevel = vs.view().baseMipLevel();
+						int maxLevel = baseLevel + vs.view().mipLevels() - 1;
+						if (texture.appliedBaseLevel != baseLevel) {
+							this.gl.texParameteri(target, WebGL2Const.GL_TEXTURE_BASE_LEVEL, baseLevel);
+							texture.appliedBaseLevel = baseLevel;
+						}
+						if (texture.appliedMaxLevel != maxLevel) {
+							this.gl.texParameteri(target, WebGL2Const.GL_TEXTURE_MAX_LEVEL, maxLevel);
+							texture.appliedMaxLevel = maxLevel;
+						}
 					}
 				}
 			}

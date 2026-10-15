@@ -30,6 +30,11 @@ public class WebGL2Texture extends GpuTexture {
 	final boolean cubemap;
 	private boolean closed;
 	private int views;
+	// Last TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL written to this GL texture. WebGL2Device
+	// creates every texture with BASE_LEVEL=0 and MAX_LEVEL=mipLevels-1, and the draw path
+	// is the only other writer, so the encoder can skip redundant texParameteri calls.
+	int appliedBaseLevel = 0;
+	int appliedMaxLevel;
 
 	public WebGL2Texture(final WebGL2RenderingContextExt gl, final @GpuTexture.Usage int usage, final String label, final GpuFormat format,
 			final int width, final int height, final int depthOrLayers, final int mipLevels, final WebGLTexture id) {
@@ -37,6 +42,7 @@ public class WebGL2Texture extends GpuTexture {
 		this.gl = gl;
 		this.id = id;
 		this.cubemap = (usage & 16) != 0;
+		this.appliedMaxLevel = mipLevels - 1;
 	}
 
 	public WebGLTexture glId() {
